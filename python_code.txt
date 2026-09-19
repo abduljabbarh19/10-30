@@ -1,0 +1,100 @@
+import boto3
+import botocore.config
+import json
+
+from datetime import datetime
+
+
+def blog_generate_using_bedrock(blogtopic: str) -> str:
+    # Llama 3 raw prompt format (NOT the Llama 2 [INST] format)
+    prompt = (
+        "<|begin_of_text|><|start_header_id|>user<|end_header_id|>\n\n"
+        f"Write a 200 word blog on the topic: {blogtopic}"
+        "<|eot_id|><|start_header_id|>assistant<|end_header_id|>\n\n"
+    )
+
+    body = {
+        "prompt": prompt,
+        "temperature": 0.7,
+        "top_p": 0.9,
+        "max_gen_len": 500
+    }
+
+    try:
+        bedrock = boto3.client(
+            "bedrock-runtime",
+            region_name="us-east-1",
+            config=botocore.config.Config(read_timeout=300, retries={'max_attempts': 3})
+        )
+        response = bedrock.invoke_model(
+            body=json.dumps(body),
+            modelId="meta.llama3-8b-instruct-v1:0",
+            contentType="application/json",
+            accept="application/json"
+        )
+
+        response_content = response.get('body').read()
+        response_data = json.loads(response_content)
+        print(response_data)
+        blog_details = response_data['generation']
+        return blog_details
+    except Exception as e:
+        print(f"Error generating the blog: {e}")
+        return ""
+
+
+def save_blog_details_s3(s3_key, s3_bucket, generate_blog) -> bool:
+    s3 = boto3.client('s3')
+
+    try:
+        s3.put_object(Bucket=s3_bucket, Key=s3_key, Body=generate_blog, ContentType="text/plain")
+        print("Blog saved to s3")
+        return True
+    except Exception as e:
+        print(f"Error when saving the blog to s3: {e}")
+        return False
+
+
+def lambda_handler(event, context):
+    # Validate and parse the incoming request
+    try:
+        event_body = json.loads(event['body'])
+        blogtopic = event_body['blog_topic']
+    except (KeyError, TypeError, json.JSONDecodeError) as e:
+        print(f"Invalid request: {e}")
+        return {
+            'statusCode': 400,
+            'body': json.dumps('Request must include a JSON body with a "blog_topic" field')
+        }
+
+    if not blogtopic or not isinstance(blogtopic, str) or not blogtopic.strip():
+        return {
+            'statusCode': 400,
+            'body': json.dumps('"blog_topic" must be a non-empty string')
+        }
+
+    generate_blog = blog_generate_using_bedrock(blogtopic=blogtopic)
+
+    if not generate_blog:
+        print("No blog was generated")
+        return {
+            'statusCode': 502,
+            'body': json.dumps('Blog generation failed')
+        }
+
+    current_time = datetime.now().strftime("%Y%m%d-%H%M%S")
+    s3_key = f"blog-output/{current_time}.txt"
+    s3_bucket = 'awsbedrockprojectteks'
+
+    saved = save_blog_details_s3(s3_key, s3_bucket, generate_blog)
+
+    if not saved:
+        return {
+            'statusCode': 500,
+            'body': json.dumps('Blog was generated but could not be saved to S3')
+        }
+
+    return {
+        'statusCode': 200,
+        'body': json.dumps('Blog Generation is completed')
+    }
